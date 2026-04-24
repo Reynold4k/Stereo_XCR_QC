@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/27032211/README.md)
 # Spatial BCR Quality Control Analysis
 
 Three companion scripts for quality-controlling **B-cell receptor (BCR)** reads in **spatial transcriptomics** data (STOmics / Stereo-seq, spleen tissue). They evaluate how well BCR chain assignments (IGH / IGK / IGL) reflect true B-cell localization, at three progressively stricter spatial resolutions.
