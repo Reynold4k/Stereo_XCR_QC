@@ -1,150 +1,247 @@
-# Spatial BCR Quality Control Analysis
+# 🧬 STOmics BCR × Cell Type Analysis Pipeline
 
-Three companion scripts for quality-controlling **B-cell receptor (BCR)** reads in **spatial transcriptomics** data (STOmics / Stereo-seq, spleen tissue). They evaluate how well BCR chain assignments (IGH / IGK / IGL) reflect true B-cell localization, at three progressively stricter spatial resolutions.
+> A modular pipeline for **Stereo-seq** spatial transcriptomics data, combining BCR (IGH ∪ IGK ∪ IGL) mapping with **RCTD** cell-type deconvolution to quantify the relationship between BCR signal density and B-cell enrichment across three spatial-binning strategies.
 
----
-
-## What this code does
-
-For every spatial unit (a square bin, a segmented cell, or the nuclear portion of a cell), each script:
-
-1. **Counts BCR signal** per unit, for each chain (IGH, IGK, IGL), using two independent measures:
-   - **Unique `targetSequences`** — how many distinct BCR sequences are captured
-   - **Unique `(x, y)` coordinates** — how many distinct read positions fall inside
-2. **Cross-references** each unit against **RCTD cell-type deconvolution** to determine whether the unit is dominated by a B-cell type.
-3. **Produces:**
-   - Frequency histograms of unique BCR counts per unit (per chain)
-   - Spatial maps of BCR density
-   - Dominant cell-type composition bar charts for each count bucket (0, 1, 2, 3, ≥4)
-   - An **IGH × IGK joint heatmap** showing the fraction of units dominated by B cells at every (IGH_n, IGK_n) combination, with gold borders marking the 80–90% B-purity sweet spot
-
-### The three scripts
-
-| Script | Spatial unit | Constraint | Purpose |
-|---|---|---|---|
-| `bin20_BCR_QC_analysis.py` | Fixed **20 × 20** square bins | Coordinate must fall inside the bin | Coarse grid baseline, no cell segmentation assumptions |
-| `cellbin_BCR_QC_analysis.py` | **Cell segmentation polygon** | Read must fall inside the cell border | Cell-level, permissive — includes cytoplasmic reads |
-| `nucleus_strict_BCR_QC_analysis.py` | Cell polygon **AND** nucleus mask (`mask > 0`) | Read must fall inside *both* the polygon and the DAPI nucleus mask | Most stringent — nuclear reads only |
-
-All three produce the same outputs structure, so results can be compared side-by-side.
+[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://www.python.org/)
+[![Status](https://img.shields.io/badge/Status-Production-success.svg)]()
+[![License](https://img.shields.io/badge/License-Internal-lightgrey.svg)]()
 
 ---
 
-## Why this QC matters
+## ✨ Highlights
 
-BCR chains (IGH, IGK, IGL) are biologically restricted to the **B-cell lineage**. In healthy tissue, a spatial unit densely populated by unique BCR sequences should, almost by definition, be a B cell. Any deviation is informative:
-
-1. **Detects diffusion and contamination.** Transcripts in spatial transcriptomics can migrate during tissue permeabilization, landing in neighboring bins. If bins with high unique-IGH counts are *not* dominated by B cells in RCTD, that signals meaningful lateral diffusion or ambient-RNA noise.
-2. **Validates the segmentation pipeline.** Going from `bin20` → `cellbin` → `nucleus-strict` should monotonically **increase B-cell purity** at the cost of sensitivity. If stricter constraints don't improve purity, the cell segmentation or nucleus mask may be misaligned with the transcript coordinates.
-3. **Produces defensible thresholds for downstream clonotype work.** The IGH × IGK heatmap reveals concrete rules like *"units with ≥3 unique IGH and ≥4 unique IGK sequences are ≥85% dominated by B cells"*. Those thresholds become the confidence gates for clonotype assignment, repertoire diversity, and somatic-hypermutation analyses — gates that can be cited and reproduced.
-4. **Surfaces technical artifacts early.** A low overall dominant-B fraction in a chain, or suspiciously high BCR counts in T-cell regions, flags problems (library prep bias, primer mis-priming, cross-chain contamination) *before* they propagate into biological conclusions.
-5. **Cross-chain consistency check.** Because IGH pairs with either IGK or IGL in a given B cell, the joint IGH × IGK heatmap implicitly checks that chain co-occurrence patterns make biological sense.
-
-In short: if these three scripts don't agree that your high-BCR units are B cells, **nothing downstream is trustworthy**.
+- 📊 **Three spatial-binning strategies** compared in one go: `bin20` / `cell bin` / `nucleus-strict`
+- 🎯 **Replicate-agnostic** — change paths once, pipeline runs end-to-end
+- 🖼️ **Publication-ready figures** with consistent black-background styling
+- 🔁 **Reproducible** — fixed random seeds, deterministic outputs
+- 💾 **Cached intermediates** — re-run downstream steps without recomputing heavy intersections
 
 ---
 
-## Inputs
+## 📚 Table of Contents
 
-Each script expects the following, configured in the `User configuration` block at the top of the file:
-
-| File | Variable | Description | Used by |
-|---|---|---|---|
-| `*.bin20_1.0.h5ad` | `H5AD_PATH` | AnnData with bin20 coordinates in `.obs[['x','y']]` or `.obsm['spatial']` | bin20 |
-| `*.cellbin_1.0.adjusted.h5ad` | `H5AD_PATH` | AnnData with cell centroids and `.obsm['cell_border']` (polygon vertices, `32767` = padding) | cellbin, nucleus-strict |
-| `*.meta.gz` | `META_PATH` | Per-read BCR metadata; must contain `topChains`, `targetSequences`, `x`, `y` | all three |
-| `GCsurrounding.csv` or `RCTD_celltype_proportion_wide.csv` | `RCTD_PATH` | RCTD deconvolution output. The bin20 script uses the `first_type` column; the cellbin and nucleus scripts use wide-format proportions and collapse B-related columns into a single `B cell` category. | all three |
-| `*_DAPI_mask.tif` | `MASK_PATH` | DAPI nucleus segmentation mask (2-D, foreground `> 0`) | nucleus-strict only |
-
-The list of B-related RCTD labels is hard-coded in `B_RELATED` at the top of each script — edit it if your cell-type naming differs.
+- [Pipeline Overview](#-pipeline-overview)
+- [Required Inputs](#-required-inputs)
+- [Configuration](#️-configuration)
+- [Usage](#️-usage)
+- [Outputs](#-outputs)
+- [Methodology](#-methodology)
+- [Visual Style Guide](#-visual-style-guide)
+- [Implementation Notes](#-implementation-notes)
+- [Dependencies](#-dependencies)
+- [Adapting to a New Replicate](#-adapting-to-a-new-replicate)
 
 ---
 
-## Installation
+## 🗂 Pipeline Overview
+
+| # | Script | Purpose |
+|:-:|---|---|
+| 🚀 | `run_all.py` | One-click entry — runs steps 1 → 4 in order |
+| 1️⃣ | `step1_three_QC.py` | BCR QC for **cellbin / bin20 / nucleus-strict** (no IGH/K/L distinction) → per-cell stats + B-proportion line plot + 5 dominant-celltype bar plots |
+| 2️⃣ | `step2_integrated_line.py` | Combines the three line plots from step 1 into **one comparison figure** |
+| 3️⃣ | `step3_ROI_visuals.py` | (a) 6 random ROIs for cell segmentation QC<br>(b) Center ROI with BCR overlay (DAPI + cellbin / nucleus)<br>(c) BCR in/out judgement under three criteria |
+| 4️⃣ | `step4_IGHK_heatmap.py` | **IGH × IGK** heatmaps on cellbin (targetSeq + coords versions), colored by dominant-B fraction |
+
+---
+
+## 📥 Required Inputs
+
+For each replicate, prepare the following files:
+
+| 📄 File | Format | Purpose |
+|---|---|---|
+| `<sample>.cellbin_*.h5ad` | AnnData | Cell polygons (`obsm['cell_border']`) + centroids |
+| `<sample>.bin20_*.h5ad` | AnnData | bin20 grid (used to detect bin size + valid bins) |
+| `<sample>_DAPI_regist.tif` | TIFF | Registered DAPI image (background) |
+| `<sample>_DAPI_mask.tif` | TIFF | Nucleus segmentation mask (binary or labeled) |
+| `<sample>_read1.fq.gz.meta.gz` | gz CSV | XCR meta with `topChains`, `targetSequences`, `x`, `y` |
+| `RCTD_celltype_proportion_wide.csv` | CSV | RCTD output (wide format: one column per celltype) — generate via the companion R script |
+
+> **📝 RCTD CSV format** must contain the following columns:
+> ```
+> spot_id, x, y, <celltype_1>, <celltype_2>, ..., <celltype_N>
+> ```
+> Each celltype column = **proportion** of that celltype at the spot.
+> Use the companion R script to export this from a `spacexr` RCTD `.rds` file.
+
+---
+
+## ⚙️ Configuration
+
+Each script has a **path-config block** at the top. To switch replicates, edit:
+
+```python
+H5AD_CELLBIN = "/.../<sample>.cellbin_1.0.adjusted.h5ad"
+H5AD_BIN20   = "/.../<sample>.bin20_1.0.h5ad"
+REGIST_PATH  = "/.../<sample>_DAPI_regist.tif"
+MASK_PATH    = "/.../<sample>_DAPI_mask.tif"
+META_PATH    = "/.../<sample>_read1.fq.gz.meta.gz"
+RCTD_WIDE    = "/.../RCTD_celltype_proportion_wide.csv"
+OUT_DIR      = "/.../<replicate_root>"
+```
+
+The `B_RELATED` list at the top defines which RCTD columns are merged into a single `"B cell"` category. **Add or remove entries** if your RCTD reference has different B-cell subtype names.
+
+---
+
+## ▶️ Usage
+
+### 🟢 Option A — Run everything
 
 ```bash
-pip install numpy pandas matplotlib anndata tifffile
+python run_all.py
 ```
 
-Python ≥ 3.8 recommended.
+This runs steps 1 → 4 sequentially. If any step fails, the pipeline stops.
 
----
+### 🟡 Option B — Run individual steps
 
-## Usage
-
-1. Open the script and edit the `User configuration` block — paths, the output root `BASE_OUT`, and (optionally) the heatmap axis caps `SEQ_AXIS_MAX_*` / `COORD_AXIS_MAX_*`.
-2. Run:
-
-   ```bash
-   python bin20_BCR_QC_analysis.py
-   python cellbin_BCR_QC_analysis.py
-   python nucleus_strict_BCR_QC_analysis.py
-   ```
-
-3. Inspect the console log for overall dominant-B percentages and per-file output paths.
-
-No command-line arguments — all configuration is at the top of each file so one run is fully reproducible from the script itself.
-
----
-
-## Outputs
-
-Each script creates five subfolders under `BASE_OUT`:
-
-```
-BASE_OUT/
-├── {prefix}_IGH/                    # per-chain plots + stats CSV
-├── {prefix}_IGK/
-├── {prefix}_IGL/
-├── {prefix}_sequence_heatmap/       # IGH × IGK heatmap for unique targetSeq
-└── {prefix}_coordinates_heatmap/    # IGH × IGK heatmap for unique coords
+```bash
+python step1_three_QC.py
+python step2_integrated_line.py
+python step3_ROI_visuals.py
+python step4_IGHK_heatmap.py
 ```
 
-where `{prefix}` is `bin20`, `cellbin`, or `nucleus`.
+> ⏱️ **Step 1 is the slowest** (per-cell polygon × point intersection over the whole tissue). Steps 2–4 reuse step 1's CSVs where applicable.
 
-Inside each per-chain folder you get, for both `targetSeq` and `coords`:
+### 🎛 Optional flags
 
-- `{chain}_{kind}_frequency.csv` + `.png` — how many units have N unique sequences/coordinates
-- `{chain}_{kind}_spatial_bins.png` — spatial map colored by count bucket (0, 1, 2, 3, ≥4)
-- `{chain}_{kind}_bin{0,1,2,3,ge4}_dominant_composition.png` — cell-type breakdown for each bucket (B subtypes merged into "B cells")
-- `{chain}_{kind}_dominant_composition_all.csv` — combined table of the above
-- `{chain}_{bin20|cellbin|nucleus}_stats.csv` — raw per-unit counts, joinable by `bx, by` (bin20) or `cell_idx` (cell-bin variants)
-
-The heatmap folders contain:
-
-- `IGH_IGK_{kind}_sweep.csv` — full sweep with `n_bins`, `n_matched`, `n_dominant_B`, `B_fraction` per (IGH_n, IGK_n)
-- `IGH_IGK_{kind}_heatmap_dominant.png` — the annotated heatmap; cells with B-fraction in **[0.80, 0.90]** are gold-bordered to highlight the recommended confidence band
-
----
-
-## Interpretation cheat sheet
-
-| You see… | Likely meaning |
+| Scenario | What to do |
 |---|---|
-| Dominant-B fraction rises steadily with IGH_n and IGK_n | Normal — more BCR signal → cleaner B cells. Expected. |
-| Dominant-B fraction is flat or noisy | Low signal, high ambient noise, or misaligned RCTD spots. Check alignment first. |
-| `nucleus-strict` and `cellbin` give nearly identical results | Most BCR transcripts are nuclear / nucleus mask covers most of the cell. Fine. |
-| `nucleus-strict` gives much higher B purity but very low counts | Expected for cytoplasm-biased transcripts — use `cellbin` for sensitivity, `nucleus-strict` for specificity. |
-| Lots of high-IGH bins with non-B dominant type | Diffusion artifact or RCTD cell-type label mismatch — verify `B_RELATED` matches your RCTD labels. |
-| IGL shows very different patterns from IGK | Biological (κ:λ ratio is tissue-dependent) or library-prep bias; compare to bulk expectations. |
+| 🚫 No nucleus mask | Leave `MASK_PATH = ""` in step 1 → nucleus-strict analysis is skipped automatically |
+| 🚫 No DAPI image | Leave `REGIST_PATH = ""` in step 3 → backgrounds fall back to cell centroids (other panels still work) |
 
 ---
 
-## Notes & caveats
+## 📤 Outputs
 
-- **Path strings contain non-ASCII directory names** (e.g. `AAA克隆_XCR`, `扫描高占比B`). These are the author's original directory names; change them to your own layout when deploying.
-- **RCTD label mismatch is the #1 source of confusion.** If the B-fractions look wrong everywhere, print `rctd["first_type"].unique()` (bin20 version) or the columns of the wide table (cellbin/nucleus versions) and make sure every B-related label is captured in `B_RELATED`.
-- **Coordinate convention for bin20** is auto-detected (lower-left corner vs. bin center). Check the console log for `Bin coordinate convention: corner/center` on first run.
-- **Cell-border padding** in `.obsm['cell_border']` uses the sentinel value `32767`; the code strips these before building each polygon.
-- The scripts are **single-threaded** and I/O-bound on the h5ad read. A full run on one spleen sample typically finishes in a few minutes.
+```
+<OUT_DIR>/
+│
+├── 📁 cellbin_BCR_QC/                 ← step 1: cellbin
+│   ├── BCR_combined_cellbin_stats.csv
+│   ├── B_proportion_by_coords_line.{png,csv}
+│   └── dominant_composition_bin{0,1,2,3,ge4}_BCRcoords.png
+│
+├── 📁 bin20_BCR_QC/                   ← step 1: bin20
+│   └── (same structure)
+│
+├── 📁 nucleus_BCR_QC/                 ← step 1: nucleus-strict (only if MASK_PATH given)
+│   └── (same structure)
+│
+├── 📁 Integrated_line_plot/           ← step 2
+│   └── integrated_B_proportion.{png,pdf}
+│
+├── 📁 cell_segmentation_QC/           ← step 3a
+│   ├── 0_overview_6_random_ROIs.png
+│   └── ROI_<i>_x*_y*_cellseg_QC.png   (×6)
+│
+├── 📁 BCR_overlay_center/             ← step 3b
+│   ├── 0_overview_center_ROI.png
+│   ├── 1_DAPI_cellbin_BCR.png
+│   ├── 2_DAPI_nucleus_BCR.png
+│   └── 3_DAPI_nucleus_cellbin_BCR.png
+│
+├── 📁 BCR_inout_judgement/            ← step 3c
+│   ├── 1_bin20_DAPI_BCR_inout.png
+│   ├── 2_cellbin_DAPI_BCR_inout.png
+│   └── 3_nucleus_DAPI_BCR_inout.png
+│
+└── 📁 IGH_IGK_heatmap_cellbin/        ← step 4
+    ├── IGH_IGK_targetSeq_heatmap_cellbin.png
+    ├── IGH_IGK_coords_heatmap_cellbin.png
+    └── IGH_IGK_*_sweep.csv
+```
 
 ---
 
-## File list
+## 🧪 Methodology
+
+### 🩸 BCR Coordinates
+
+> **BCR coordinates** = unique `(x, y)` records where `topChains ∈ {IGH, IGK, IGL}`.
+
+By default **IGH / IGK / IGL are merged** ("any BCR"). Step 4 separates them only for the dual-chain heatmap.
+
+### 📐 Three Spatial-Binning Criteria
+
+Used throughout the pipeline for in/out judgement:
+
+| Criterion | Definition |
+|---|---|
+| 🟦 **`bin20`** | BCR coordinate falls inside **any valid bin** in the bin20 AnnData |
+| 🟢 **`cell bin`** | BCR coordinate falls inside **any cell polygon** (`obsm['cell_border']`) |
+| 🔴 **`nucleus-strict`** | BCR coordinate falls inside **both a cell polygon AND nucleus mask foreground** (`mask > 0`) |
+
+### 🎯 Dominant-B Definition
+
+RCTD per-spot proportions are merged across all `B_RELATED` columns into a single `"B cell"` category:
 
 ```
-bin20_BCR_QC_analysis.py            # bin20-level QC
-cellbin_BCR_QC_analysis.py          # cell-polygon QC
-nucleus_strict_BCR_QC_analysis.py   # cell-polygon + nucleus mask QC
-README.md                           # this file
+dominant_celltype = argmax(proportions)
 ```
+
+A spot is **B-dominant** if its `dominant_celltype == "B cell"`.
+
+---
+
+## 🎨 Visual Style Guide
+
+| Element | Color | Notes |
+|---|---|---|
+| 🖤 Background | Black | All single-tissue images use black for inline-DAPI compatibility |
+| 🟦 Boundaries / grids | Cyan `#00E5FF` | Avoids clashing with red/pink cell-status palettes |
+| 💗 BCR — in-boundary | Magenta `#FF00FF` | Filled circle marker |
+| ❌ BCR — out-of-boundary | Red `×` `#FF1744` | "x" marker for emphasis |
+| 🥇 Heatmap highlight | Gold border | Cells in 80–90% B-fraction range |
+
+---
+
+## 📝 Implementation Notes
+
+- 🔍 **bin20 coordinate convention** (corner vs. center) is **auto-detected** from the AnnData by checking whether `bx` values are integer-multiples of `bin_size`.
+- 💾 **Step 1 caches** per-cell stats to CSV, so steps 2–4 can be re-run quickly without recomputing the polygon × point intersection.
+- 🖨️ All figures use `bbox_inches="tight"` and `facecolor="black"` for **clean PPT pasting** (no white bleed).
+
+---
+
+## 📦 Dependencies
+
+### 🐍 Python (≥ 3.9)
+
+```
+numpy            pandas         scipy
+matplotlib       scikit-image
+anndata          scanpy
+tifffile
+```
+
+### 📊 R (only for generating `RCTD_celltype_proportion_wide.csv`)
+
+```
+spacexr          dplyr          tidyr
+readr            tibble         Matrix
+```
+
+---
+
+## 🔁 Adapting to a New Replicate
+
+> ✅ **No logic changes required** — just paths.
+
+1. 📁 Copy the entire script folder to a new working location (or just re-edit in place)
+2. ✏️ Update the **path block** at the top of each `step*.py` to point to the new replicate's files
+3. 🧬 If RCTD column names differ, update `B_RELATED` accordingly
+4. 🚀 Run `python run_all.py`
+
+That's it — same pipeline, same logic, new data.
+
+---
+
+<div align="center">
+
+**🧬 Built for reproducible spatial BCR analysis 🧬**
+
+</div>
